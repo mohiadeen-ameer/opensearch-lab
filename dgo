@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Runs `go <args>` inside a golang container, so you don't need Go installed.
+# The container joins the cluster's Docker network and reaches OpenSearch as os-node1.
+#
+#   ./dgo test ./...
+#   ./dgo run . setup
+#   ./dgo run . ingest
+#   ./dgo run . serve        # http://localhost:8080
+set -euo pipefail
+cd "$(dirname "$0")"
+
+tty=()
+[ -t 0 ] && [ -t 1 ] && tty=(-it)
+
+# Publish the web port only for `serve`, so ingest can run while the server is up.
+ports=()
+[[ " $* " == *" serve "* ]] && ports=(-p 8080:8080)
+
+exec docker run --rm ${tty[@]+"${tty[@]}"} \
+  -v "$PWD":/app -w /app \
+  -v oslab-gocache:/root/.cache -v oslab-gomod:/go/pkg/mod \
+  --network opensearch-lab_os-net \
+  -e OPENSEARCH_URL="${OPENSEARCH_URL:-http://os-node1:9200}" \
+  ${ports[@]+"${ports[@]}"} \
+  golang:1.24 go "$@"

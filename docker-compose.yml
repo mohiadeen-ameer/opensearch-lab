@@ -1,0 +1,68 @@
+# Three-node OpenSearch cluster plus OpenSearch Dashboards (for the Dev Tools console).
+# Security is disabled on purpose: this is a local learning cluster, never expose it.
+#
+# Bump the version with:  OPENSEARCH_VERSION=<tag> docker compose up -d
+
+x-os-env: &os-env
+  cluster.name: wiki-lab
+  discovery.seed_hosts: os-node1,os-node2,os-node3
+  cluster.initial_cluster_manager_nodes: os-node1,os-node2,os-node3
+  bootstrap.memory_lock: "true"
+  OPENSEARCH_JAVA_OPTS: -Xms512m -Xmx512m
+  DISABLE_INSTALL_DEMO_CONFIG: "true"
+  DISABLE_SECURITY_PLUGIN: "true"
+
+x-os-node: &os-node
+  image: opensearchproject/opensearch:${OPENSEARCH_VERSION:-3.0.0}
+  restart: unless-stopped
+  ulimits:
+    memlock: { soft: -1, hard: -1 }
+    nofile: { soft: 65536, hard: 65536 }
+  networks: [os-net]
+
+services:
+  os-node1:
+    <<: *os-node
+    container_name: os-node1
+    environment:
+      <<: *os-env
+      node.name: os-node1
+    volumes: [os-data1:/usr/share/opensearch/data]
+    ports:
+      - "9200:9200"
+
+  os-node2:
+    <<: *os-node
+    container_name: os-node2
+    environment:
+      <<: *os-env
+      node.name: os-node2
+    volumes: [os-data2:/usr/share/opensearch/data]
+
+  os-node3:
+    <<: *os-node
+    container_name: os-node3
+    environment:
+      <<: *os-env
+      node.name: os-node3
+    volumes: [os-data3:/usr/share/opensearch/data]
+
+  os-dashboards:
+    image: opensearchproject/opensearch-dashboards:${OPENSEARCH_VERSION:-3.0.0}
+    container_name: os-dashboards
+    restart: unless-stopped
+    ports:
+      - "5601:5601"
+    environment:
+      OPENSEARCH_HOSTS: '["http://os-node1:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    depends_on: [os-node1]
+    networks: [os-net]
+
+volumes:
+  os-data1:
+  os-data2:
+  os-data3:
+
+networks:
+  os-net:
