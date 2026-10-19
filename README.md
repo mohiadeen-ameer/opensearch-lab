@@ -16,39 +16,63 @@ every piece teaches.
 ## 1. Architecture
 
 ```mermaid
-flowchart LR
-    WIKI["Wikipedia API<br/>en.wikipedia.org/w/api.php"]
+flowchart TB
+    YOU(("You"))
+    YOU --> BROWSER["Search app in browser<br/>localhost:8080"]
+    YOU --> OSD["OpenSearch Dashboards<br/>localhost:5601"]
 
-    subgraph GO["Go program (one binary, three commands)"]
-        SETUP["setup<br/>index.go"]
-        INGEST["ingest<br/>ingest.go"]
-        SERVE["serve :8080<br/>server.go"]
+    WIKI["Wikipedia API"] -- "article intros" --> INGEST
+
+    subgraph GO["Go program"]
+        SETUP["setup<br/>creates the index"]
+        INGEST["ingest<br/>loads the data"]
+        SERVE["serve<br/>web server"]
     end
 
-    subgraph CLUSTER["Docker: OpenSearch cluster 'wiki-lab'"]
-        N1["os-node1<br/>:9200"]
+    BROWSER -- "/api/search etc." --> SERVE
+
+    subgraph CLUSTER["OpenSearch cluster"]
+        N1["os-node1<br/>localhost:9200"]
         N2["os-node2"]
         N3["os-node3"]
-        N1 <--> N2 <--> N3 <--> N1
     end
 
-    OSD["OpenSearch Dashboards<br/>:5601"]
-    BROWSER["Browser<br/>web/index.html"]
-    YOU(("You"))
-
     SETUP -- "PUT /wikipedia_v1" --> N1
-    WIKI -- "article intros (JSON)" --> INGEST
     INGEST -- "POST /_bulk" --> N1
-    SERVE -- "_search, _explain,<br/>_analyze, _cat" --> N1
-    BROWSER -- "/api/*" --> SERVE
-    OSD -- "REST" --> N1
-    YOU --> BROWSER
-    YOU --> OSD
+    SERVE -- "_search" --> N1
+    OSD -- "_search" --> N1
+    N1 <-. "shards + replication" .-> N2
+    N2 <-. " " .-> N3
 ```
 
 - **Cluster:** 3 OpenSearch 3.0.0 nodes. Every node can be cluster manager, data and ingest node. Only os-node1 publishes port 9200 to your Mac. The other two are reachable only inside the Docker network.
-- **Dashboards:** the OpenSearch web console (Kibana fork). Here it is used for Dev Tools, Discover, Visualize and the plugin apps. See `DASHBOARDS.md`.
+- **Dashboards:** the OpenSearch web console (Kibana fork). Here it is used for Dev Tools, Discover, a ready-made dashboard and the plugin apps. See `DASHBOARDS.md`.
 - **Go program:** standard library only. It talks plain HTTP/JSON, so every call in the code is exactly what you would type into Dev Tools.
+
+### What is running (`docker ps`)
+
+| Container | What it is | Port on your Mac |
+| --- | --- | --- |
+| `os-node1` | OpenSearch node 1: the database/search engine (Java, runs Lucene) | **9200**: the REST API |
+| `os-node2` | OpenSearch node 2, same image, holds other shards | none (internal only) |
+| `os-node3` | OpenSearch node 3 | none (internal only) |
+| `os-dashboards` | OpenSearch Dashboards web console (Node.js) | **5601**: the web UI |
+| `golang` (temporary) | started by `./dgo`; runs the Go app, removed when it exits | **8080** while `serve` runs |
+
+**What is http://localhost:9200?** It is the front door to OpenSearch itself: a REST API that speaks JSON,
+with no UI of its own. Everything (the Go app, Dashboards, `curl`) talks to the cluster through it. Any node
+can take a request and forward it to the right shards, so going through only os-node1 is fine.
+Try these in a browser:
+
+| URL | Shows |
+| --- | --- |
+| http://localhost:9200 | cluster name, node name, version |
+| http://localhost:9200/_cluster/health?pretty | green / yellow / red, node and shard counts |
+| http://localhost:9200/_cat/nodes?v | the 3 nodes; `*` is the elected cluster manager |
+| http://localhost:9200/_cat/shards/wikipedia?v | which node holds each shard copy |
+| http://localhost:9200/_cat/indices?v | every index, doc count, size |
+| http://localhost:9200/wikipedia/_mapping?pretty | the field mapping created by `setup` |
+| http://localhost:9200/wikipedia/_search?q=jazz&size=1&pretty | a search, raw JSON response |
 
 ---
 
@@ -63,7 +87,7 @@ curl localhost:9200/_cluster/health?pretty   # wait for "status" : "green"
 
 ./dgo run . setup             # create index wikipedia_v1 + alias wikipedia
 ./dgo run . ingest            # fetch about 1,800 articles from Wikipedia (a few minutes; Wikipedia rate-limits)
-./dashboards-setup.sh         # register the index in Dashboards (Discover, Visualize)
+./dashboards-setup.sh         # import the index pattern + "Wikipedia lab overview" dashboard
 ./dgo run . serve             # http://localhost:8080   (Ctrl+C to stop)
 
 ./dgo test ./...              # unit tests, no cluster needed
@@ -108,29 +132,18 @@ Three containers from the same image, joined by these settings:
 `setup` waits for the cluster to be at least yellow, then sends **one** request: `PUT /wikipedia_v1`
 with the settings, analyzers, mapping and alias in a single JSON body (`indexBody`).
 
-```mermaid
-flowchart TB
-    subgraph IDX["index wikipedia_v1 (alias: wikipedia)"]
-        direction LR
-        subgraph S0["shard 0"]
-            P0["primary<br/>os-node2"]
-            R0["replica<br/>os-node3"]
-        end
-        subgraph S1["shard 1"]
-            P1["primary<br/>os-node3"]
-            R1["replica<br/>os-node1"]
-        end
-        subgraph S2["shard 2"]
-            P2["primary<br/>os-node1"]
-            R2["replica<br/>os-node2"]
-        end
-    end
-    P0 -. replicates .-> R0
-    P1 -. replicates .-> R1
-    P2 -. replicates .-> R2
-```
+The index is split into 3 shards (P0, P1, P2). Each has one copy (R0, R1, R2), always on a different node,
+so losing any one node loses no data:
 
-(Node placement is decided by the cluster manager. Your run may differ. Check with `GET _cat/shards/wikipedia?v`.)
+| | os-node1 | os-node2 | os-node3 |
+| --- | --- | --- | --- |
+| **shard 0** (614 docs) | | **primary** | replica |
+| **shard 1** (599 docs) | replica | | **primary** |
+| **shard 2** (584 docs) | **primary** | replica | |
+
+Stop any one node: every shard still has a copy on the other two. This is Lab 2.
+
+(The cluster manager decides placement, so your run may differ. Check with `GET _cat/shards/wikipedia?v`.)
 
 The mapping, field by field:
 
@@ -169,20 +182,20 @@ sequenceDiagram
     participant P as primary shard
     participant R as replica shard
 
-    loop each of 6 root categories, then its subcategories
-        I->>W: generator=categorymembers & prop=extracts|info|categories
-        W-->>I: partial pages + "continue" token
-        Note over I: merge parts by page id until no "continue"<br/>on HTTP 429: wait (Retry-After or 2s, 4s, 8s...) and retry
+    loop each category
+        I->>W: get articles in category
+        W-->>I: titles, intro text, categories
+        Note over I,W: if Wikipedia answers 429,<br/>wait and retry
     end
-    I->>C: POST /_bulk (NDJSON, 200 docs per request, _id = page id)
-    C->>C: alias wikipedia -> wikipedia_v1<br/>shard = hash(_id) % 3
-    C->>P: forward each doc to its primary
-    P->>P: check mapping, analyze, assign _seq_no,<br/>write buffer + translog
-    P->>R: replicate the operation
-    R-->>P: ack
-    P-->>C: per-item status (201 / 200 / error)
-    C-->>I: {"errors": false, "items": [...]}
-    I->>C: POST /wikipedia/_refresh, GET /wikipedia/_count
+    I->>C: POST /_bulk (200 docs per request)
+    Note over C: pick the shard:<br/>hash(_id) mod 3
+    C->>P: send doc to that shard's primary
+    Note over P: check mapping, analyze text,<br/>write to buffer + translog
+    P->>R: copy to replica
+    R-->>P: ok
+    P-->>C: ok
+    C-->>I: per-document status
+    I->>C: POST /wikipedia/_refresh
 ```
 
 Key choices:
@@ -252,24 +265,22 @@ sequenceDiagram
     participant S1 as shard 1 copy
     participant S2 as shard 2 copy
 
-    B->>G: q=quantum mechanics
-    G->>C: POST wikipedia/_search (searchBody)
-    par query phase: one copy of each shard
-        C->>S0: query
-        C->>S1: query
-        C->>S2: query
-    end
-    Note over S0,S2: analyze query text, walk the inverted index,<br/>BM25 with this shard's statistics,<br/>keep top from+size, partial facet counts
-    S0-->>C: top ids + scores + buckets
-    S1-->>C: top ids + scores + buckets
-    S2-->>C: top ids + scores + buckets
-    Note over C: merge into global top 10, merge buckets
-    par fetch phase: only shards that own a winner
-        C->>S0: get _source + highlight
-        C->>S2: get _source + highlight
-    end
-    C-->>G: hits, aggregations, suggest
-    G-->>B: shapeSearch(): trimmed JSON
+    B->>G: q = quantum mechanics
+    G->>C: POST wikipedia/_search
+    Note over C,S2: 1. QUERY PHASE
+    C->>S0: query
+    C->>S1: query
+    C->>S2: query
+    Note over S0,S2: each shard scores its docs (BM25)<br/>and returns only its top 10 ids
+    S0-->>C: top ids + scores
+    S1-->>C: top ids + scores
+    S2-->>C: top ids + scores
+    Note over C: merge into global top 10
+    Note over C,S2: 2. FETCH PHASE
+    C->>S0: get full docs for winners
+    C->>S2: get full docs for winners
+    C-->>G: hits + facets + suggestions
+    G-->>B: JSON for the page
 ```
 
 The relevance query (`mainQuery`) in plain words:
@@ -299,7 +310,8 @@ highlight:   title + text, <mark> tags        <- HTML-encoded so article text ca
 | `web/index.html` | the whole UI, one file, embedded in the Go binary with `go:embed` | calls `/api/*` |
 | `lab_test.go` | tests with fake OpenSearch and Wikipedia servers (`httptest`) | |
 | `dgo` | runs Go in Docker | |
-| `dashboards-setup.sh` | creates the `wikipedia` index pattern in Dashboards | Dashboards saved objects API |
+| `dashboards-setup.sh` | imports `dashboards/wikipedia-dashboard.ndjson` into Dashboards | Dashboards saved objects `_import` API |
+| `dashboards/wikipedia-dashboard.ndjson` | exported index pattern, 6 visualizations, 1 dashboard | |
 
 ---
 

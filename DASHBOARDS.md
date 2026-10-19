@@ -25,13 +25,35 @@ The Go app and Dashboards are two independent clients of the same cluster. Neith
 | `docker-compose.yml`, service `os-dashboards` | image `opensearch-dashboards:3.0.0`, port 5601 |
 | `OPENSEARCH_HOSTS: '["http://os-node1:9200"]'` | the cluster it talks to (by Docker network name) |
 | `DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"` | no login screen (matches the cluster's disabled security plugin) |
-| `dashboards-setup.sh` | creates the `wikipedia` **index pattern** and makes it the default |
+| `dashboards/wikipedia-dashboard.ndjson` | a saved-objects export: the `wikipedia` **index pattern**, 6 visualizations and the dashboard |
+| `dashboards-setup.sh` | imports that file (`POST /api/saved_objects/_import`) and makes `wikipedia` the default index pattern |
 
 An **index pattern** (also called a data view) tells Dashboards which indices to read (`wikipedia`, the alias)
 and caches the list of fields and their types from the mapping. Discover and Visualize need one.
 Dev Tools does not.
 
 If you recreate the index or run `docker compose down -v`, run `./dashboards-setup.sh` again.
+
+### The ready-made dashboard
+
+Open **http://localhost:5601/app/dashboards#/view/wiki-overview** ("Wikipedia lab overview"):
+
+| Panel | What it shows | Aggregation behind it |
+| --- | --- | --- |
+| Read me | what the dashboard is and how to inspect it | none (markdown) |
+| Totals | number of articles, average article size | `value_count`, `avg` on `length` |
+| Category cloud | most common categories, bigger = more articles | `terms` on `categories` |
+| Article size buckets | how many articles are under 2 KB, 2-5 KB, ... | `range` on `length` |
+| Top categories | top 15 categories as bars | `terms` on `categories` |
+| Longest articles | the 10 largest articles | `terms` on `title.keyword` ordered by `max(length)` |
+
+Things to try on it:
+- Type `text:jazz` in the search bar at the top: **every panel** re-runs with that query.
+- Click a bar in *Top categories*: it becomes a filter for the whole dashboard.
+- Panel menu (⋯) → **Inspect** → **Requests**: the exact `_search` body and response for that panel.
+- **Edit** → add your own visualization, then **Save**. Dashboards stores it in the `.kibana` index.
+
+The time picker ("Last 15 minutes") does nothing here: the index pattern has no time field, so all data always shows.
 
 ## 3. The apps, and what to do with each one here
 
@@ -44,7 +66,7 @@ Open http://localhost:5601 and use the ☰ menu on the left.
 | **Dev Tools → Console** (`/app/dev_tools#/console`) | REST client with autocomplete | all of `LABS.md`. Press ▶ (or Cmd+Enter) to send the request under the cursor | whatever you type |
 | **Discover** (`/app/data-explorer/discover`) | browse and filter raw documents | pick index pattern `wikipedia`; search `text:quantum and categories:"Physics"` (DQL); add `title`, `length` as columns; click a document to see its JSON | `_search` with `query_string`/bool, `_source` |
 | **Visualize** (`/app/visualize`) | build one chart | Create → *Vertical bar* → `wikipedia` → X-axis: *Terms* on `categories`, size 10 → Update. That is the facet list as a chart. Then try *Histogram* on `length` | `_search` with `size: 0` + `aggs` |
-| **Dashboards** (`/app/dashboards`) | a grid of saved visualizations | Create dashboard → Add → pick the bar chart above. The query bar on top filters every panel at once | one `_msearch` per refresh |
+| **Dashboards** (`/app/dashboards`) | a grid of saved visualizations | open "Wikipedia lab overview" (above), or Create dashboard → Add → pick your own chart | one `_msearch` per refresh |
 | **Dashboards Management → Index patterns** | manage index patterns | open `wikipedia`: see each field's type, *searchable* and *aggregatable* flags. `categories` is aggregatable (keyword, doc values), `text` is not (text field) | `_mapping`, `_field_caps` |
 | **Saved objects** (same menu) | export/import what you built | export your dashboard as `.ndjson` to keep it | reads/writes the `.kibana` index |
 
