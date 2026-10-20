@@ -6,6 +6,7 @@ every piece teaches.
 
 | Doc | Use it for |
 | --- | --- |
+| `COLLEGE-GRAD-GUIDE.md` | **start here if you're new**: the whole project in plain language, following one article |
 | `README.md` (this file) | architecture, diagrams, code-to-concept map |
 | `DASHBOARDS.md` | what OpenSearch Dashboards is, and how to use each of its apps with this data |
 | `LABS.md` | 14 hands-on experiments in the Dev Tools console |
