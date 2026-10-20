@@ -16,35 +16,42 @@ every piece teaches.
 
 ## 1. Architecture
 
+**Loading the data** (run once):
+
 ```mermaid
-flowchart TB
-    YOU(("You"))
-    YOU --> BROWSER["Search app in browser<br/>localhost:8080"]
-    YOU --> OSD["OpenSearch Dashboards<br/>localhost:5601"]
+flowchart LR
+    WIKI["Wikipedia API<br/>en.wikipedia.org"] -- "article intros" --> ING["ingest<br/>Go program"] -- "POST /_bulk" --> OS[("OpenSearch<br/>3-node cluster")]
 
-    WIKI["Wikipedia API"] -- "article intros" --> INGEST
-
-    subgraph GO["Go program"]
-        SETUP["setup<br/>creates the index"]
-        INGEST["ingest<br/>loads the data"]
-        SERVE["serve<br/>web server"]
-    end
-
-    BROWSER -- "/api/search etc." --> SERVE
-
-    subgraph CLUSTER["OpenSearch cluster"]
-        N1["os-node1<br/>localhost:9200"]
-        N2["os-node2"]
-        N3["os-node3"]
-    end
-
-    SETUP -- "PUT /wikipedia_v1" --> N1
-    INGEST -- "POST /_bulk" --> N1
-    SERVE -- "_search" --> N1
-    OSD -- "_search" --> N1
-    N1 <-. "shards + replication" .-> N2
-    N2 <-. " " .-> N3
+    classDef ext fill:#f3f3f3,stroke:#666,color:#000
+    classDef go fill:#d6ecff,stroke:#1f6feb,color:#000
+    classDef os fill:#dff5e1,stroke:#2da44e,color:#000
+    class WIKI ext
+    class ING go
+    class OS os
 ```
+
+(`setup` runs before this, once, to create the empty index.)
+
+**Using it** (every search):
+
+```mermaid
+flowchart LR
+    YOU(("You"))
+    WEB["Search website<br/>localhost:8080<br/>Go program: serve"]
+    OSD["OpenSearch Dashboards<br/>localhost:5601"]
+    OS[("OpenSearch<br/>localhost:9200")]
+    YOU --> WEB --> OS
+    YOU --> OSD --> OS
+
+    classDef go fill:#d6ecff,stroke:#1f6feb,color:#000
+    classDef osd fill:#ffe9a8,stroke:#b58900,color:#000
+    classDef os fill:#dff5e1,stroke:#2da44e,color:#000
+    class WEB go
+    class OSD osd
+    class OS os
+```
+
+Inside "OpenSearch" there are 3 nodes (containers). See the shard placement table in §3 and the cluster diagrams in `INTERVIEW.md` §2.
 
 - **Cluster:** 3 OpenSearch 3.0.0 nodes. Every node can be cluster manager, data and ingest node. Only os-node1 publishes port 9200 to your Mac. The other two are reachable only inside the Docker network.
 - **Dashboards:** the OpenSearch web console (Kibana fork). Here it is used for Dev Tools, Discover, a ready-made dashboard and the plugin apps. See `DASHBOARDS.md`.
@@ -148,19 +155,15 @@ Stop any one node: every shard still has a copy on the other two. This is Lab 2.
 
 The mapping, field by field:
 
-```mermaid
-flowchart LR
-    DOC["document"] --> PID["page_id: integer"]
-    DOC --> TITLE["title: text<br/>(standard analyzer)"]
-    TITLE --> TK["title.keyword: keyword<br/>exact match, sort"]
-    TITLE --> TA["title.autocomplete: text<br/>edge n-gram analyzer"]
-    DOC --> TEXT["text: text<br/>(english analyzer: stems, stop words)"]
-    TEXT --> TE["text.exact: text<br/>(standard, no stemming)"]
-    DOC --> CAT["categories: keyword<br/>filters + facets"]
-    DOC --> LEN["length: integer"]
-    DOC --> URL["url: keyword<br/>stored only, not searchable"]
-    DOC --> FA["fetched_at: date"]
-```
+| Field | Type | Extra sub-fields | Used for |
+| --- | --- | --- | --- |
+| `page_id` | integer | | bookkeeping |
+| `title` | text (standard analyzer) | `title.keyword` (exact, sortable), `title.autocomplete` (edge n-grams) | search, type-ahead |
+| `text` | text (english analyzer: stems, drops stop words) | `text.exact` (standard, no stemming) | search, "did you mean" |
+| `categories` | keyword | | filters and facet counts |
+| `length` | integer | | charts, sorting |
+| `url` | keyword, `index: false` | | stored only, not searchable |
+| `fetched_at` | date | | bookkeeping |
 
 `"dynamic": "strict"` means a document with any other field is rejected instead of guessed.
 
@@ -170,7 +173,14 @@ How one string becomes tokens, by analyzer (try it on the Internals tab):
 flowchart LR
     IN["'The running dogs'"] --> STD["standard"] --> O1["the · running · dogs"]
     IN --> ENG["english"] --> O2["run · dog"]
-    IN --> AC["autocomplete_index<br/>(standard + lowercase + edge_ngram 2-15)"] --> O3["th · the · ru · run · runn · ... · dogs"]
+    IN --> AC["autocomplete_index"] --> O3["th · the · ru · run · runn ... dogs"]
+
+    classDef in fill:#f3f3f3,stroke:#666,color:#000
+    classDef an fill:#d6ecff,stroke:#1f6feb,color:#000
+    classDef out fill:#dff5e1,stroke:#2da44e,color:#000
+    class IN in
+    class STD,ENG,AC an
+    class O1,O2,O3 out
 ```
 
 ### Step 3: loading data (`ingest.go`, command `ingest`)
@@ -208,52 +218,32 @@ What happens to a document inside a shard after the write:
 
 ```mermaid
 flowchart LR
-    W["index request"] --> BUF["in-memory buffer"]
-    W --> TL["translog<br/>(fsync per request)"]
-    BUF -- "refresh, every 5s" --> SEG["new segment<br/>searchable"]
-    SEG -- "background merge" --> BIG["fewer, bigger segments<br/>deleted docs purged"]
-    TL -- "flush = Lucene commit" --> DISK["segments fsynced,<br/>translog trimmed"]
+    W["index request"] --> BUF["in-memory buffer"] -- "refresh, every 5s" --> SEG["new segment<br/>SEARCHABLE"] -- "background merge" --> BIG["fewer, bigger segments"]
+    W --> TL["translog on disk"] -- "flush" --> DISK["segments fsynced<br/>translog cleared"]
+
+    classDef a fill:#d6ecff,stroke:#1f6feb,color:#000
+    classDef b fill:#dff5e1,stroke:#2da44e,color:#000
+    classDef c fill:#ffe9a8,stroke:#b58900,color:#000
+    class W,BUF a
+    class SEG,BIG b
+    class TL,DISK c
 ```
+
+Blue/green row = **visibility** (when search can see it). Yellow row = **durability** (when it survives a crash).
 
 ### Step 4: searching (`server.go`, command `serve`)
 
 The browser never talks to OpenSearch directly. Each UI action calls one Go endpoint, which makes one OpenSearch call:
 
-```mermaid
-flowchart LR
-    subgraph UI["web/index.html"]
-        SB["search box + results"]
-        TA["type-ahead dropdown"]
-        WHY["'Why this score?'"]
-        FAC["category facets"]
-        NODES["Internals: nodes + health"]
-        SH["Internals: shard grid"]
-        AN["Internals: analyzer compare"]
-    end
-    subgraph GO["server.go"]
-        A1["/api/search"]
-        A2["/api/suggest"]
-        A3["/api/explain"]
-        A4["/api/cluster"]
-        A5["/api/shards"]
-        A6["/api/analyze"]
-    end
-    subgraph OS["OpenSearch"]
-        Q1["POST wikipedia/_search<br/>bool + multi_match + aggs +<br/>post_filter + highlight + suggest"]
-        Q2["POST wikipedia/_search<br/>match on title.autocomplete"]
-        Q3["POST wikipedia/_explain/{id}"]
-        Q4["GET _cluster/health<br/>GET _cat/nodes"]
-        Q5["GET _cat/shards/wikipedia"]
-        Q6["POST wikipedia/_analyze x3"]
-    end
-    SB --> A1 --> Q1
-    FAC --> A1
-    TA --> A2 --> Q2
-    WHY --> A3 --> Q3
-    NODES --> A4 --> Q4
-    SH --> A5 --> Q5
-    AN --> A6 --> Q6
-```
+| You do this in the UI | Browser calls (Go) | Go calls (OpenSearch) |
+| --- | --- | --- |
+| type in the search box, page through results | `/api/search` | `POST wikipedia/_search` with bool + multi_match + aggs + highlight + suggest |
+| tick a category on the left | `/api/search?category=...` | same, plus `post_filter` |
+| type a few letters (dropdown) | `/api/suggest` | `POST wikipedia/_search`, `match` on `title.autocomplete` |
+| click "Why this score?" | `/api/explain` | `POST wikipedia/_explain/{id}` |
+| Internals tab: nodes and health | `/api/cluster` | `GET _cluster/health`, `GET _cat/nodes` |
+| Internals tab: shard grid | `/api/shards` | `GET _cat/shards/wikipedia` |
+| Internals tab: analyzer compare | `/api/analyze` | `POST wikipedia/_analyze` (3 times) |
 
 What OpenSearch does with one search, the "query then fetch" model:
 

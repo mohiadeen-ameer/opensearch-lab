@@ -10,14 +10,190 @@ Revision style: facts first, then the question bank. Each point matches a lab in
 
 ## 2. Cluster architecture
 
-- **Cluster** = nodes sharing a name. **Node roles:** cluster manager (keeps cluster state: mappings, shard locations), data, ingest, coordinating-only (no other role; routes requests), machine learning.
-- **Cluster state** is held by the elected cluster manager and published to all nodes. Too many shards or fields makes it heavy.
-- **Election:** majority vote among cluster-manager-eligible nodes. Use 3 (odd) to survive one failure and avoid split brain. Production uses dedicated cluster-manager nodes.
-- **Index** -> **shards** (primary + replicas) -> each shard is a **Lucene index** made of **segments**.
-- Primary shard count is fixed at creation (routing modulo). Replica count can change any time.
-- Replica benefits: high availability and more read throughput. Costs: disk and indexing work.
-- **Health:** green = all shards assigned; yellow = replica missing; red = a primary missing.
-- **Allocation:** awareness (spread across racks or zones), disk watermarks (low 85%, high 90%, flood stage 95% makes indices read-only), delayed allocation after a node leaves.
+Every diagram below uses this project's real cluster: 3 nodes, index `wikipedia_v1`, 3 primary shards, 1 replica each.
+
+### 2.1 Cluster, nodes and roles
+
+- **Cluster** = nodes sharing a name (`cluster.name: wiki-lab`).
+- **Node roles:** cluster manager (keeps the cluster state), data (holds shards), ingest (runs ingest pipelines), coordinating-only (no other role, just routes requests), machine learning. In this lab every node has every role. Production splits them.
+- **Cluster state** = the cluster's "table of contents": which nodes exist, which indices and mappings exist, which shard copy lives on which node. Only the **elected cluster manager** changes it, then **publishes** a copy to every node. Too many shards or fields makes it heavy.
+
+```mermaid
+flowchart TB
+    CM["os-node2<br/>ELECTED CLUSTER MANAGER<br/>owns the cluster state"]
+    STATE[("cluster state<br/>nodes, indices, mappings,<br/>which shard is on which node")]
+    N1["os-node1<br/>data + ingest + coordinating"]
+    N3["os-node3<br/>data + ingest + coordinating"]
+    CM --- STATE
+    STATE -- "published copy" --> N1
+    STATE -- "published copy" --> N3
+
+    classDef mgr fill:#ffe9a8,stroke:#b58900,color:#000
+    classDef data fill:#d6ecff,stroke:#1f6feb,color:#000
+    classDef st fill:#f3f3f3,stroke:#666,color:#000
+    class CM mgr
+    class N1,N3 data
+    class STATE st
+```
+
+### 2.2 Election and split brain
+
+- The cluster manager is chosen by **majority vote** among cluster-manager-eligible nodes.
+- **Split brain** = a network cut splits the cluster in two, both halves elect their own manager, and the data diverges. Requiring a **majority** prevents it, because only one side can have more than half the votes.
+- Use **3** (odd) eligible nodes: survives 1 failure. With 2 nodes, losing either leaves 1 of 2, which is no majority.
+- Production uses 3 **dedicated** cluster-manager nodes that hold no data, so heavy queries can't slow down cluster management.
+
+```mermaid
+flowchart TB
+    A1["os-node1 + os-node2<br/>2 of 3 votes"]
+    B1["os-node3 alone<br/>1 of 3 votes"]
+    A1 --> WA["MAJORITY<br/>elects a manager<br/>keeps working"]
+    B1 --> WB["NO MAJORITY<br/>cannot elect<br/>stops accepting writes"]
+
+    classDef n fill:#d6ecff,stroke:#1f6feb,color:#000
+    classDef ok fill:#dff5e1,stroke:#2da44e,color:#000
+    classDef bad fill:#ffd7d5,stroke:#cf222e,color:#000
+    class A1,B1 n
+    class WA ok
+    class WB bad
+```
+
+*(After a network cut between os-node3 and the other two.)*
+
+### 2.3 Index, shards, segments
+
+- **Index** -> **shards** (each has 1 primary + N replica copies) -> each shard copy is a full **Lucene index** -> made of **segments** (small immutable files).
+
+```mermaid
+flowchart TB
+    IDX["INDEX wikipedia_v1"]
+    S0["SHARD 0"]
+    S1["SHARD 1"]
+    S2["SHARD 2"]
+    P2["primary copy"]
+    R2["replica copy"]
+    L["each copy is a<br/>LUCENE INDEX"]
+    SEG["made of SEGMENTS<br/>small immutable files"]
+    IDX --> S0
+    IDX --> S1
+    IDX --> S2
+    S2 --> P2
+    S2 --> R2
+    P2 --> L --> SEG
+
+    classDef a fill:#d6ecff,stroke:#1f6feb,color:#000
+    classDef b fill:#dff5e1,stroke:#2da44e,color:#000
+    classDef c fill:#f3f3f3,stroke:#666,color:#000
+    class IDX a
+    class S0,S1,S2 b
+    class P2,R2,L,SEG c
+```
+
+- **Routing:** a document's shard is `hash(_id) mod number_of_primaries`. That's why the **primary count is fixed** at creation: change it and every document would map to a different shard. To change it, use split, shrink or reindex. The **replica count can change any time**.
+
+```mermaid
+flowchart LR
+    ID["_id = 15613"] --> H["hash(_id)"] --> MOD["mod 3<br/>number of primaries"] --> SH["shard 2"]
+    classDef a fill:#d6ecff,stroke:#1f6feb,color:#000
+    class ID,H,MOD,SH a
+```
+
+### 2.4 Primaries and replicas across nodes
+
+- A replica is **never** placed on the same node as its primary.
+- **Replica benefits:** high availability (a node can die without data loss) and more read throughput (searches can use either copy). **Costs:** double the disk, and every write is indexed twice.
+
+This lab's actual placement (green = primary, dashed = replica):
+
+```mermaid
+flowchart LR
+    subgraph N1["os-node1"]
+        a1["P2 primary"]
+        a2["R1 replica"]
+    end
+    subgraph N2["os-node2"]
+        b1["P0 primary"]
+        b2["R2 replica"]
+    end
+    subgraph N3["os-node3"]
+        c1["P1 primary"]
+        c2["R0 replica"]
+    end
+    N1 ~~~ N2 ~~~ N3
+
+    classDef p fill:#dff5e1,stroke:#2da44e,color:#000
+    classDef r fill:#f3f3f3,stroke:#888,color:#000,stroke-dasharray:4 3
+    class a1,b1,c1 p
+    class a2,b2,c2 r
+```
+
+Lose any one node and every shard still has a copy on the other two.
+
+### 2.5 Cluster health
+
+```mermaid
+flowchart TB
+    Q1["Is every PRIMARY shard<br/>assigned to a node?"]
+    Q2["Is every REPLICA shard<br/>assigned too?"]
+    RED["RED<br/>some data unavailable"]
+    YEL["YELLOW<br/>all data there,<br/>less redundancy"]
+    GRN["GREEN<br/>fully healthy"]
+    Q1 -- no --> RED
+    Q1 -- yes --> Q2
+    Q2 -- no --> YEL
+    Q2 -- yes --> GRN
+
+    classDef q fill:#f3f3f3,stroke:#666,color:#000
+    classDef r fill:#ffd7d5,stroke:#cf222e,color:#000
+    classDef y fill:#fff3b0,stroke:#bf8700,color:#000
+    classDef g fill:#dff5e1,stroke:#2da44e,color:#000
+    class Q1,Q2 q
+    class RED r
+    class YEL y
+    class GRN g
+```
+
+What happens when a data node dies (try it: `docker stop os-node3`, Lab 2):
+
+```mermaid
+sequenceDiagram
+    participant M as os-node2 (manager)
+    participant N1 as os-node1
+    participant N3 as os-node3
+    Note over N3: node crashes
+    M->>M: no heartbeat from os-node3
+    M->>N1: promote R1 replica to primary
+    Note over M: status YELLOW<br/>no data lost
+    Note over M: wait 1 min (delayed allocation)<br/>in case os-node3 comes back
+    M->>N1: rebuild missing replicas<br/>on surviving nodes
+    Note over M: status GREEN again
+```
+
+### 2.6 Allocation
+
+The cluster manager decides where every shard copy goes. Three rules to know:
+
+- **Awareness:** tag nodes with a rack or availability zone, so a primary and its replica never share one. Then a whole zone can fail without data loss.
+- **Delayed allocation:** after a node leaves, wait (default 1 minute) before rebuilding its replicas elsewhere. That avoids copying gigabytes around for a node that is only restarting.
+- **Disk watermarks:** protect nodes from filling their disks.
+
+```mermaid
+flowchart LR
+    D0["below 85%<br/>normal"]
+    D1["85% LOW<br/>no new shards<br/>placed here"]
+    D2["90% HIGH<br/>move shards<br/>off this node"]
+    D3["95% FLOOD STAGE<br/>indices become<br/>read-only"]
+    D0 --> D1 --> D2 --> D3
+
+    classDef g fill:#dff5e1,stroke:#2da44e,color:#000
+    classDef y fill:#fff3b0,stroke:#bf8700,color:#000
+    classDef o fill:#ffe0c2,stroke:#d4600a,color:#000
+    classDef r fill:#ffd7d5,stroke:#cf222e,color:#000
+    class D0 g
+    class D1 y
+    class D2 o
+    class D3 r
+```
 
 ## 3. Write path (trace it)
 
