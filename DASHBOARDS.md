@@ -34,6 +34,11 @@ Dev Tools does not.
 
 If you recreate the index or run `docker compose down -v`, run `./dashboards-setup.sh` again.
 
+**Dark mode** is on by default (set by `dashboards-setup.sh`). To switch, either run
+`DARK_MODE=false ./dashboards-setup.sh`, or in Dashboards go to ☰ → **Dashboards Management** → **Advanced settings**,
+search for *dark mode*, toggle it, save, and reload the page. Like everything else in Dashboards, the setting
+is stored in the `.kibana` index in OpenSearch.
+
 ### The ready-made dashboard
 
 Open **http://localhost:5601/app/dashboards#/view/wiki-overview** ("Wikipedia lab overview"):
